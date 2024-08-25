@@ -1,6 +1,7 @@
 import yt_dlp
 import subprocess
 import re
+import math
 
 def get_available_formats(url, proxy=None):
     ydl_opts = {
@@ -19,14 +20,23 @@ def select_best_formats(formats):
     best_audio = None
 
     for fmt in formats:
+        # 获取比特率并转换为浮点数
+        tbr = fmt.get('tbr')
+        if tbr is None:
+            continue
+        try:
+            tbr = float(tbr)
+        except ValueError:
+            continue
+        
         # 判断是否为视频格式
         if fmt.get('vcodec') and fmt['vcodec'] != 'none':
-            if best_video is None or (int(fmt.get('format_id', '0')) > int(best_video.get('format_id', '0'))):
+            if best_video is None or tbr > float(best_video.get('tbr', '0')):
                 best_video = fmt
         
         # 判断是否为音频格式
-        if fmt.get('acodec') and fmt['acodec'] != 'none':
-            if best_audio is None or (int(fmt.get('format_id', '0')) > int(best_audio.get('format_id', '0'))):
+        if fmt.get('acodec') and fmt['acodec'] != 'none' and fmt['height'] is None:
+            if best_audio is None or tbr > float(best_audio.get('tbr', '0')):
                 best_audio = fmt
 
     return best_video, best_audio
@@ -90,15 +100,37 @@ def compare_formats(downloaded_video_info, downloaded_audio_info, best_video, be
     
     return video_match, audio_match
 
-def main():
-    # 获取用户输入的YouTube URL
-    url = input("请输入YouTube视频的URL: ")
 
+def is_youtube_url(url):
+    """ 检查URL是否为有效的YouTube网址 """
+    youtube_regex = (
+        r'^(?:https?:\/\/)?(?:www\.)?'
+        r'(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|user\/\w+\/|playlist\?list=)|'
+        r'youtu\.be\/)'
+        r'([\w-]{11})$'
+    )
+    return re.match(youtube_regex, url) is not None
+
+def get_youtube_url():
+    while True:
+        url = input("请输入YouTube视频的URL: ").strip()  # 去除前后空白字符
+        if url and is_youtube_url(url):
+            return url
+        print("请输入一个有效的YouTube视频URL。")
+
+
+
+
+def main():
+    video_url = get_youtube_url()
     # 设置代理
     proxy = 'http://127.0.0.1:10809'
+    
+    print(f"你输入的URL是: {video_url}")
+    print(f"使用代理: {proxy}")
 
     # 步骤1: 获取所有可用格式
-    available_formats = get_available_formats(url, proxy)
+    available_formats = get_available_formats(video_url, proxy)
 
     # 步骤2: 从可用格式中选择最好的视频和音频格式
     best_video, best_audio = select_best_formats(available_formats)
@@ -107,7 +139,7 @@ def main():
 
     # 步骤3: 下载并合并选定的视频和音频
     output_file = 'downloaded_video.mp4'
-    download_best_video_and_audio(url, best_video, best_audio, output_file, proxy)
+    download_best_video_and_audio(video_url, best_video, best_audio, output_file, proxy)
 
     # 步骤4: 获取已下载视频和音频的属性
     video_info, audio_info = get_video_properties(output_file)
