@@ -1,70 +1,128 @@
+import yt_dlp
 import subprocess
-import os
-import winreg
+import re
 
-def get_windows_proxy():
+def get_available_formats(url, proxy=None):
+    ydl_opts = {
+        'listformats': True,  # 列出所有可用格式
+        'proxy': proxy,  # 设置代理
+    }
+    
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info_dict = ydl.extract_info(url, download=False)
+        formats = info_dict.get('formats', [])
+    
+    return formats
+
+def select_best_formats(formats):
+    best_video = None
+    best_audio = None
+
+    for fmt in formats:
+        # 判断是否为视频格式
+        if fmt.get('vcodec') and fmt['vcodec'] != 'none':
+            if best_video is None or (int(fmt.get('format_id', '0')) > int(best_video.get('format_id', '0'))):
+                best_video = fmt
+        
+        # 判断是否为音频格式
+        if fmt.get('acodec') and fmt['acodec'] != 'none':
+            if best_audio is None or (int(fmt.get('format_id', '0')) > int(best_audio.get('format_id', '0'))):
+                best_audio = fmt
+
+    return best_video, best_audio
+
+def download_best_video_and_audio(url, best_video, best_audio, output_filename='downloaded_video.mp4', proxy=None):
+    ydl_opts = {
+        'format': f"{best_video['format_id']}+{best_audio['format_id']}",
+        'merge_output_format': 'mp4',
+        'outtmpl': output_filename,
+        'postprocessors': [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4',
+        }],
+        'proxy': proxy,  # 设置代理
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+def get_video_properties(file_path):
     try:
-        # 打开注册表键
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Internet Settings')
+        video_info = subprocess.check_output([
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height,r_frame_rate',
+            '-of', 'default=noprint_wrappers=1', file_path
+        ]).decode('utf-8').strip()
 
-        # 读取代理设置
-        proxy_enable, _ = winreg.QueryValueEx(key, 'ProxyEnable')
-        if proxy_enable == 1:
-            proxy_server, _ = winreg.QueryValueEx(key, 'ProxyServer')
-            return proxy_server
-    except FileNotFoundError:
-        print("未找到Windows代理设置")
-    except Exception as e:
-        print("获取Windows代理设置失败:", e)
-    finally:
-        winreg.CloseKey(key)
+        audio_info = subprocess.check_output([
+            'ffprobe', '-v', 'error', '-select_streams', 'a:0',
+            '-show_entries', 'stream=sample_rate,channels,bit_rate',
+            '-of', 'default=noprint_wrappers=1', file_path
+        ]).decode('utf-8').strip()
 
-    return None
+        return video_info, audio_info
+    except subprocess.CalledProcessError as e:
+        print(f"Error occurred while getting video properties: {e}")
+        return None, None
 
-def download_video(url):
-    # 获取系统代理设置
-    proxy_server = get_windows_proxy()
+def compare_formats(downloaded_video_info, downloaded_audio_info, best_video, best_audio):
+    video_match = False
+    audio_match = False
 
-    # 设置环境变量
-    if proxy_server:
-        os.environ['HTTP_PROXY'] = proxy_server
-        os.environ['HTTPS_PROXY'] = proxy_server
+    # 解析ffprobe的输出
+    video_width = int(re.search(r'width=(\d+)', downloaded_video_info).group(1))
+    video_height = int(re.search(r'height=(\d+)', downloaded_video_info).group(1))
+    video_frame_rate = re.search(r'r_frame_rate=(\d+/\d+)', downloaded_video_info).group(1)
+    
+    audio_sample_rate = int(re.search(r'sample_rate=(\d+)', downloaded_audio_info).group(1))
+    audio_channels = int(re.search(r'channels=(\d+)', downloaded_audio_info).group(1))
+    audio_bit_rate = int(re.search(r'bit_rate=(\d+)', downloaded_audio_info).group(1))
+    
+    # 对比视频格式
+    if best_video and (best_video.get('width') == video_width and best_video.get('height') == video_height):
+        video_match = True
+        print(f"Matching video format found: {best_video}")
 
-    # 构建下载命令
-    command = ['youtubedr', '--log-level', 'debug', 'download', '-q', 'hd', url]
+    # 对比音频格式
+    if best_audio and (best_audio.get('asr') == audio_sample_rate and best_audio.get('audio_channels') == audio_channels):
+        audio_match = True
+        print(f"Matching audio format found: {best_audio}")
+    
+    return video_match, audio_match
 
-    # 执行下载命令
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def main():
+    # 获取用户输入的YouTube URL
+    url = input("请输入YouTube视频的URL: ")
 
-    # 逐行读取命令输出
-    for line in process.stdout:
-        print(line.strip())
+    # 设置代理
+    proxy = 'http://127.0.0.1:10809'
 
-    # 等待命令执行结束
-    process.wait()
+    # 步骤1: 获取所有可用格式
+    available_formats = get_available_formats(url, proxy)
 
-    # 检查是否出错
-    if process.returncode != 0:
-        print("下载出错:", process.stderr.read())
+    # 步骤2: 从可用格式中选择最好的视频和音频格式
+    best_video, best_audio = select_best_formats(available_formats)
+    print(f"Selected best video format: {best_video}")
+    print(f"Selected best audio format: {best_audio}")
+
+    # 步骤3: 下载并合并选定的视频和音频
+    output_file = 'downloaded_video.mp4'
+    download_best_video_and_audio(url, best_video, best_audio, output_file, proxy)
+
+    # 步骤4: 获取已下载视频和音频的属性
+    video_info, audio_info = get_video_properties(output_file)
+    print("\nDownloaded Video Info:")
+    print(video_info)
+    print("\nDownloaded Audio Info:")
+    print(audio_info)
+
+    # 步骤5: 对比已下载文件的格式与选定的最佳格式
+    video_match, audio_match = compare_formats(video_info, audio_info, best_video, best_audio)
+
+    if video_match and audio_match:
+        print("The downloaded video and audio match the selected best formats.")
     else:
-        print("下载完成")
-
-        # 删除临时文件
-        delete_temp_files()
-
-def delete_temp_files():
-    # 检查当前目录下的所有文件
-    current_dir = os.getcwd()
-    for filename in os.listdir(current_dir):
-        if filename.endswith(".m4v") or filename.endswith(".m4a"):
-            file_path = os.path.join(current_dir, filename)
-            try:
-                # 删除文件
-                os.remove(file_path)
-                print(f"删除临时文件: {filename}")
-            except Exception as e:
-                print(f"删除文件 {filename} 出错:", e)
+        print("The downloaded video and/or audio do not match the selected best formats.")
 
 if __name__ == "__main__":
-    video_url = input("请输入YouTube视频链接: ")
-    download_video(video_url)
+    main()
