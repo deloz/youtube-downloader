@@ -212,17 +212,6 @@ def download_progress_hook(d):
             print(f"\r下载进度: {percentage:.1f}% | "
                   f"已下载: {downloaded_mb:.2f}MB / {total_mb:.2f}MB | "
                   f"速度: {speed_kb:.2f}KB/s", end='')
-        speed = d.get('speed', 0)
-        
-        if total:
-            percentage = (downloaded / total) * 100
-            downloaded_mb = downloaded / 1024 / 1024
-            total_mb = total / 1024 / 1024
-            speed_kb = speed / 1024 if speed else 0
-            
-            print(f"\r下载进度: {percentage:.1f}% | "
-                  f"已下载: {downloaded_mb:.2f}MB / {total_mb:.2f}MB | "
-                  f"速度: {speed_kb:.2f}KB/s", end='')
 
 def main():
     try:
