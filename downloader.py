@@ -4,6 +4,11 @@ import re
 import os
 import platform
 import winreg
+import urllib.request
+import zipfile
+import shutil
+import time
+import requests
 
 def get_available_formats(url, proxy=None):
     """ 获取所有可用格式 """
@@ -25,43 +30,81 @@ def select_best_formats(formats):
     best_audio = None
 
     for fmt in formats:
-        # 获取比特率并转换为浮点数
-        tbr = fmt.get('tbr')
-        if tbr is None:
-            continue
-        try:
-            tbr = float(tbr)
-        except ValueError:
-            continue
-        
         # 判断是否为视频格式
         if fmt.get('vcodec') and fmt['vcodec'] != 'none':
-            if best_video is None or tbr > float(best_video.get('tbr', '0')):
+            if best_video is None or (int(fmt.get('format_id', '0')) > int(best_video.get('format_id', '0'))):
                 best_video = fmt
         
         # 判断是否为音频格式
-        if fmt.get('acodec') and fmt['acodec'] != 'none' and fmt['height'] is None:
-            if best_audio is None or tbr > float(best_audio.get('tbr', '0')):
+        if fmt.get('acodec') and fmt['acodec'] != 'none':
+            if best_audio is None or (int(fmt.get('format_id', '0')) > int(best_audio.get('format_id', '0'))):
                 best_audio = fmt
 
     return best_video, best_audio
 
-def download_best_video_and_audio(url, best_video, best_audio, output_filename='downloaded_video.mp4', proxy=None):
-    """ 下载最佳视频和音频 """
-
-    ydl_opts = {
-        'format': f"{best_video['format_id']}+{best_audio['format_id']}",
-        'merge_output_format': 'mp4',
-        'outtmpl': output_filename,
-        'postprocessors': [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4',
-        }],
-        'proxy': proxy,  # 设置代理
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+def download_with_progress(url, best_video, best_audio, output_filename='downloaded_video.mp4', proxy=None):
+    """ 下载视频并显示进度 """
+    video_filename = f"temp_video_{best_video['format_id']}.mp4"
+    audio_filename = f"temp_audio_{best_audio['format_id']}.m4a"
+    
+    try:
+        # 下载视频流
+        video_opts = {
+            'format': best_video['format_id'],
+            'outtmpl': video_filename,
+            'proxy': proxy,
+            'progress_hooks': [download_progress_hook],
+        }
+        print("\n正在下载视频流...")
+        with yt_dlp.YoutubeDL(video_opts) as ydl:
+            ydl.download([url])
+        
+        # 下载音频流
+        audio_opts = {
+            'format': best_audio['format_id'],
+            'outtmpl': audio_filename,
+            'proxy': proxy,
+            'progress_hooks': [download_progress_hook],
+        }
+        print("\n正在下载音频流...")
+        with yt_dlp.YoutubeDL(audio_opts) as ydl:
+            ydl.download([url])
+        
+        # 使用 ffmpeg 合并视频和音频
+        print("\n正在合并视频和音频...")
+        ffmpeg_process = subprocess.Popen([
+            'ffmpeg', '-i', video_filename,
+            '-i', audio_filename,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            output_filename
+        ])
+        ffmpeg_process.wait()  # 等待进程完成
+        
+        # 在删除文件前先等待一小段时间
+        time.sleep(1)  # 给系统一些时间完全释放文件句柄
+        
+        # 清理临时文件的部分
+        for temp_file in [video_filename, audio_filename]:
+            if os.path.exists(temp_file):
+                max_retries = 5  # 增加重试次数
+                retry_delay = 1  # 减少每次重试的等待时间
+                for attempt in range(max_retries):
+                    try:
+                        os.close(os.open(temp_file, os.O_RDONLY))  # 确保文件句柄被关闭
+                        os.remove(temp_file)
+                        break
+                    except OSError as e:
+                        if attempt == max_retries - 1:  # 最后一次尝试
+                            print(f"警告：无法删除临时文件 {temp_file}: {e}")
+                        else:
+                            time.sleep(retry_delay)
+                            continue
+        return True
+        
+    except Exception as e:
+        print(f"\n下载或合并出错: {str(e)}")
+        return False
 
 def get_video_properties(file_path):
     """ 获取视频属性 """
@@ -109,27 +152,44 @@ def compare_formats(downloaded_video_info, downloaded_audio_info, best_video, be
     
     return video_match, audio_match
 
+def extract_video_id(url):
+    """ 从YouTube URL中提取视频ID """
+    youtube_regex = (
+        r'(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|user\/\w+\/|playlist\?list=)|'
+        r'youtu\.be\/)'
+        r'([\w-]{11})'
+    )
+    match = re.search(youtube_regex, url)
+    return match.group(1) if match else None
 
 def is_youtube_url(url):
     """ 检查URL是否为有效的YouTube网址 """
+    # 基本URL格式验证
     youtube_regex = (
         r'^(?:https?:\/\/)?(?:www\.)?'
         r'(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|user\/\w+\/|playlist\?list=)|'
         r'youtu\.be\/)'
-        r'([\w-]{11})$'
+        r'([\w-]{11})'  # 视频ID格式
     )
-    return re.match(youtube_regex, url) is not None
+    
+    if not re.match(youtube_regex, url):
+        return False
+    
+    # 提取视频ID并验证
+    video_id = extract_video_id(url)
+    return video_id is not None
 
 def get_youtube_url():
     """ 获取YouTube视频URL """
-
     while True:
         url = input("请输入YouTube视频URL(输入q退出): ").strip()
         if url.lower() == 'q':
             print("程序退出...")
             exit(0)
         if url and is_youtube_url(url):
-            return url
+            video_id = extract_video_id(url)
+            # 构建标准化的URL格式
+            return f"https://www.youtube.com/watch?v={video_id}"
         print("请输入一个有效的YouTube视频URL。")
 
 def get_windows_proxy():
@@ -137,14 +197,19 @@ def get_windows_proxy():
     try:
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
-            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+            0, 
+            winreg.KEY_READ
         ) as key:
             proxy_enable = winreg.QueryValueEx(key, 'ProxyEnable')[0]
             if proxy_enable:
                 proxy_server = winreg.QueryValueEx(key, 'ProxyServer')[0]
+                # 修改：确保返回正确格式的代理地址
                 if proxy_server and ':' in proxy_server:
-                    return f'http://{proxy_server}'
-    except WindowsError:
+                    if not proxy_server.startswith(('http://', 'https://')):
+                        return f'http://{proxy_server}'
+                    return proxy_server
+    except (WindowsError, TypeError):
         pass
     return None
 
@@ -172,31 +237,6 @@ def get_proxy_config():
             return proxy
     return None
 
-def download_with_progress(url, best_video, best_audio, output_filename='downloaded_video.mp4', proxy=None):
-    """ 下载视频并显示进度 """
-
-    ydl_opts = {
-        'format': f"{best_video['format_id']}+{best_audio['format_id']}",
-        'merge_output_format': 'mp4',
-        'outtmpl': output_filename,
-        'postprocessors': [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4',
-        }],
-        'proxy': proxy,
-        'progress_hooks': [download_progress_hook],
-        'retries': 10,
-        'continuedl': True,  # 启用续传功能
-    }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            ydl.download([url])
-        except Exception as e:
-            print(f"\n下载出错: {str(e)}")
-            return False
-    return True
-
 def download_progress_hook(d):
     if d['status'] == 'downloading':
         total = d.get('total_bytes')
@@ -208,18 +248,200 @@ def download_progress_hook(d):
             downloaded_mb = downloaded / 1024 / 1024
             total_mb = total / 1024 / 1024
             speed_kb = speed / 1024 if speed else 0
-            
             print(f"\r下载进度: {percentage:.1f}% | "
                   f"已下载: {downloaded_mb:.2f}MB / {total_mb:.2f}MB | "
                   f"速度: {speed_kb:.2f}KB/s", end='')
+
+def download_with_resume(url, file_path, proxy=None):
+    """支持断点续传的下载函数"""
+    try:
+        # 设置请求头和代理
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        proxies = {'http': proxy, 'https': proxy} if proxy else None
+        
+        # 获取已下载文件的大小
+        file_size = 0
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+            headers['Range'] = f'bytes={file_size}-'
+
+        # 发送请求
+        response = requests.get(url, headers=headers, proxies=proxies, stream=True)
+        total_size = int(response.headers.get('content-length', 0)) + file_size
+        
+        mode = 'ab' if file_size > 0 else 'wb'
+        print(f"\n继续从 {file_size/(1024*1024):.1f}MB 处开始下载...") if file_size > 0 else print("\n开始下载...")
+        
+        with open(file_path, mode) as f:
+            downloaded = file_size
+            chunk_size = 8192
+            last_print_time = time.time()
+            last_downloaded = downloaded
+            
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                
+                # 每秒更新一次下载进度
+                current_time = time.time()
+                if current_time - last_print_time >= 1.0:
+                    speed = (downloaded - last_downloaded) / (current_time - last_print_time)
+                    speed_text = f"{speed/1024/1024:.2f}MB/s"
+                    
+                    if total_size > 0:
+                        percent = downloaded * 100 / total_size
+                        print(f"\r下载进度: {percent:.1f}% | "
+                              f"已下载: {downloaded/(1024*1024):.1f}MB / "
+                              f"{total_size/(1024*1024):.1f}MB | "
+                              f"速度: {speed_text}", end='')
+                    else:
+                        print(f"\r已下载: {downloaded/(1024*1024):.1f}MB | "
+                              f"速度: {speed_text}", end='')
+                    
+                    last_print_time = current_time
+                    last_downloaded = downloaded
+
+        print("\n下载完成!")
+        return True
+            
+    except requests.exceptions.RequestException as e:
+        print(f"\n下载出错: {str(e)}")
+        return False
+    except Exception as e:
+        print(f"\n发生未知错误: {str(e)}")
+        return False
+
+def download_and_install_ffmpeg(proxy=None):
+    """下载并安装 FFmpeg 到当前目录"""
+    if platform.system() != 'Windows':
+        print("自动安装只支持 Windows 系统")
+        return False
+        
+    temp_dir = None
+    try:
+        print("\n正在下载 FFmpeg...")
+        temp_dir = os.path.join(os.getcwd(), 'temp_ffmpeg')
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        zip_path = os.path.join(temp_dir, "ffmpeg.zip")
+        extract_path = os.path.join(temp_dir, "ffmpeg")
+        
+        # FFmpeg 下载链接
+        download_urls = [
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+        ]
+        
+        # 尝试所有下载链接
+        download_success = False
+        for url in download_urls:
+            print(f"\n尝试从 {url} 下载...")
+            max_retries = 300
+            for retry in range(max_retries):
+                try:
+                    if download_with_resume(url, zip_path, proxy):
+                        # 验证下载的文件
+                        if os.path.exists(zip_path) and zipfile.is_zipfile(zip_path):
+                            download_success = True
+                            break
+                        else:
+                            print(f"\n下载的文件无效,正在重试({retry + 1}/{max_retries})...")
+                            if os.path.exists(zip_path):
+                                os.remove(zip_path)
+                except Exception as e:
+                    print(f"\n下载出错: {str(e)}")
+                    if retry < max_retries - 1:
+                        print(f"等待 5 秒后重试({retry + 1}/{max_retries})...")
+                        time.sleep(5)
+                    continue
+            
+            if download_success:
+                break
+                
+        if not download_success:
+            print("\n所有下载地址均失败，请稍后重试或手动安装")
+            return False
+            
+        # 解压后只复制需要的文件到当前目录
+        print("正在解压并复制必要文件...")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_path)
+        
+        ffmpeg_dirs = [d for d in os.listdir(extract_path) if 'ffmpeg' in d.lower()]
+        if not ffmpeg_dirs:
+            print("无法找到 FFmpeg 目录")
+            return False
+            
+        bin_path = os.path.join(extract_path, ffmpeg_dirs[0], "bin")
+        
+        # 复制必要的可执行文件到当前目录
+        for file in ['ffmpeg.exe', 'ffprobe.exe']:
+            src = os.path.join(bin_path, file)
+            dst = os.path.join(os.getcwd(), file)
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                
+        print("FFmpeg 文件已复制到当前目录！")
+        return True
+        
+    except Exception as e:
+        print(f"安装 FFmpeg 时出错: {str(e)}")
+        return False
+    finally:
+        # 清理临时文件
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as e:
+                print(f"清理临时文件时出错: {str(e)}")
+
+def check_ffmpeg(proxy=None):
+    """ 检查当前目录或系统是否安装了 ffmpeg """
+    current_dir = os.getcwd()
+    ffmpeg_path = os.path.join(current_dir, 'ffmpeg.exe')
+    ffprobe_path = os.path.join(current_dir, 'ffprobe.exe')
+    
+    if os.path.exists(ffmpeg_path) and os.path.exists(ffprobe_path):
+        return True
+        
+    try:
+        subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except FileNotFoundError:
+        print("\nFFmpeg 未安装！")
+        if platform.system() == 'Windows':
+            print("\n是否要下载 FFmpeg 到当前目录？(y/n): ", end='')
+            if input().strip().lower() == 'y':
+                return download_and_install_ffmpeg(proxy)
+            else:
+                print("\n请手动下载 FFmpeg:")
+                print("1. 访问 https://github.com/BtbN/FFmpeg-Builds/releases")
+                print("2. 下载 ffmpeg-master-latest-win64-gpl.zip")
+                print("3. 解压文件")
+                print("4. 将 ffmpeg.exe 和 ffprobe.exe 复制到当前目录")
+        else:
+            print("请使用包管理器安装 FFmpeg:")
+            print("Ubuntu/Debian: sudo apt-get install ffmpeg")
+            print("macOS: brew install ffmpeg")
+        return False
 
 def main():
     try:
         print("\nYouTube视频下载器启动...")
         print("="*50 + "\n")
         
-        video_url = get_youtube_url()
+        # 先获取代理设置
         proxy = get_proxy_config()
+        
+        # 检查 ffmpeg 是否安装，传入代理参数
+        if not check_ffmpeg(proxy):
+            print("\n请安装 FFmpeg 后重试")
+            return
+            
+        video_url = get_youtube_url()
         
         print("\n获取视频信息中...")
         available_formats = get_available_formats(video_url, proxy)

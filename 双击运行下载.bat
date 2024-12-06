@@ -1,3 +1,4 @@
+chcp 65001
 @echo off
 echo 正在启动YouTube视频下载器...
 echo.
