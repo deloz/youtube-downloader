@@ -25,27 +25,43 @@ def get_available_formats(url, proxy=None):
 
 def select_best_formats(formats):
     """ 选择最佳视频和音频格式 """
-
     best_video = None
     best_audio = None
 
+    # 选择ID数字最大的视频格式
     for fmt in formats:
-        # 判断是否为视频格式
+        # 确保是视频流（有视频编码且不是纯音频）
         if fmt.get('vcodec') and fmt['vcodec'] != 'none':
-            if best_video is None or (int(fmt.get('format_id', '0')) > int(best_video.get('format_id', '0'))):
-                best_video = fmt
-        
-        # 判断是否为音频格式
+            try:
+                # 尝试将format_id转换为整数
+                format_id = int(fmt.get('format_id', '0'))
+                if best_video is None or format_id > int(best_video.get('format_id', '0')):
+                    best_video = fmt
+            except ValueError:
+                continue
+
+    # 选择ID数字最大的音频格式
+    for fmt in formats:
+        # 确保是音频流（有音频编码且不是纯视频）
         if fmt.get('acodec') and fmt['acodec'] != 'none':
-            if best_audio is None or (int(fmt.get('format_id', '0')) > int(best_audio.get('format_id', '0'))):
-                best_audio = fmt
+            try:
+                # 尝试将format_id转换为整数
+                format_id = int(fmt.get('format_id', '0'))
+                if best_audio is None or format_id > int(best_audio.get('format_id', '0')):
+                    best_audio = fmt
+            except ValueError:
+                continue
 
     return best_video, best_audio
 
 def download_with_progress(url, best_video, best_audio, output_filename='downloaded_video.mp4', proxy=None):
     """ 下载视频并显示进度 """
-    video_filename = f"temp_video_{best_video['format_id']}.mp4"
-    audio_filename = f"temp_audio_{best_audio['format_id']}.m4a"
+    # 根据实际格式设置正确的扩展名
+    video_ext = best_video.get('ext', 'mp4')
+    audio_ext = best_audio.get('ext', 'webm')
+    
+    video_filename = f"temp_video_{best_video['format_id']}.{video_ext}"
+    audio_filename = f"temp_audio_{best_audio['format_id']}.{audio_ext}"
     
     try:
         # 下载视频流
@@ -70,13 +86,18 @@ def download_with_progress(url, best_video, best_audio, output_filename='downloa
         with yt_dlp.YoutubeDL(audio_opts) as ydl:
             ydl.download([url])
         
-        # 使用 ffmpeg 合并视频和音频
+        # 使用 ffmpeg 合并视频和音频，完全保留原始编码
         print("\n正在合并视频和音频...")
         ffmpeg_process = subprocess.Popen([
-            'ffmpeg', '-i', video_filename,
+            'ffmpeg',
+            '-i', video_filename,
             '-i', audio_filename,
-            '-c:v', 'copy',
-            '-c:a', 'aac',
+            '-c:v', 'copy',           # 复制视频流，不重新编码
+            '-c:a', 'aac',            # 将音频转换为AAC编码（MP4容器兼容）
+            '-b:a', '192k',           # 设置音频比特率
+            '-map', '0:v:0',          # 选择第一个文件的视频流
+            '-map', '1:a:0',          # 选择第二个文件的音频流
+            '-movflags', '+faststart', # 优化MP4文件结构
             output_filename
         ])
         ffmpeg_process.wait()  # 等待进程完成
@@ -227,14 +248,25 @@ def get_proxy_config():
     system_proxy = get_system_proxy()
     if system_proxy:
         print(f"检测到系统代理: {system_proxy}")
-        use_proxy = input("是否使用系统代理? (y/n): ").strip().lower()
-        if use_proxy == 'y':
-            return system_proxy
-    else:
-        use_proxy = input("未检测到系统代理，是否手动设置代理? (y/n): ").strip().lower()
+        while True:
+            use_proxy = input("是否使用系统代理? (y/n): ").strip().lower()
+            if use_proxy == 'y':
+                return system_proxy
+            elif use_proxy == 'n':
+                break
+            else:
+                print("请输入 y 或 n")
+    
+    while True:
+        use_proxy = input("是否手动设置代理? (y/n): ").strip().lower()
         if use_proxy == 'y':
             proxy = input("请输入代理地址: ").strip()
             return proxy
+        elif use_proxy == 'n':
+            break
+        else:
+            print("请输入 y 或 n")
+    
     return None
 
 def download_progress_hook(d):
