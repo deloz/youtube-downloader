@@ -10,6 +10,7 @@ import shutil
 import time
 import requests
 import string
+from pathlib import Path
 
 def get_available_formats(url, proxy=None):
     """ 获取所有可用格式 """
@@ -57,42 +58,61 @@ def select_best_formats(formats):
 
 def sanitize_filename(filename):
     """清理文件名，移除非法字符"""
-    # 保留英文字母、数字、中文字符和一些基本符号，替换其他字符为下划线
-    valid_chars = f'-_.() {string.ascii_letters}{string.digits}，。：！？'
-    sanitized = ''.join(c if c in valid_chars else '_' for c in filename)
+    path = Path(filename)
+    stem = path.stem
+    suffix = path.suffix
+    
+    # Windows保留文件名列表
+    INVALID_NAMES = {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+    
+    # 检查是否为Windows保留文件名
+    base = stem.upper()
+    if base in INVALID_NAMES:
+        stem = f"_{stem}_"
+    
+    # 检查非法字符（Windows文件名不允许的字符）
+    sanitized_stem = re.sub(r'[\\/:*?"<>|]', '_', stem)
+    
     # 移除可能导致问题的前导和尾随空格与点号
-    sanitized = sanitized.strip('. ')
+    sanitized_stem = sanitized_stem.strip('. ')
+    
     # 如果文件名变成空字符串，使用默认名称
-    if not sanitized:
-        sanitized = "video"
-    return sanitized
+    if not sanitized_stem:
+        sanitized_stem = "video"
+        
+    # 组合处理后的文件名和原始后缀
+    return sanitized_stem + suffix
 
 def download_with_progress(url, best_video, best_audio, video_title=None, proxy=None):
     """ 下载视频并显示进度 """
     # 创建下载目录
-    download_dir = os.path.join(os.getcwd(), "downloads")
-    os.makedirs(download_dir, exist_ok=True)
+    download_dir = Path.cwd() / "downloads"
+    download_dir.mkdir(exist_ok=True)
     
     # 处理文件名
     if video_title:
         # 清理文件名中的非法字符
         safe_title = sanitize_filename(video_title)
-        output_filename = os.path.join(download_dir, f"{safe_title}.mp4")
+        output_filename = download_dir / f"{safe_title}.mp4"
     else:
-        output_filename = os.path.join(download_dir, "downloaded_video.mp4")
+        output_filename = download_dir / "downloaded_video.mp4"
     
     # 根据实际格式设置正确的扩展名
     video_ext = best_video.get('ext', 'mp4')
     audio_ext = best_audio.get('ext', 'webm')
     
-    video_filename = os.path.join(download_dir, f"temp_video_{best_video['format_id']}.{video_ext}")
-    audio_filename = os.path.join(download_dir, f"temp_audio_{best_audio['format_id']}.{audio_ext}")
+    video_filename = download_dir / f"{safe_title}_{best_video['format_id']}.{video_ext}"
+    audio_filename = download_dir / f"{safe_title}_{best_audio['format_id']}.{audio_ext}"
     
     try:
         # 下载视频流
         video_opts = {
             'format': best_video['format_id'],
-            'outtmpl': video_filename,
+            'outtmpl': str(video_filename),  # 转换为字符串，因为yt_dlp不支持Path对象
             'proxy': proxy,
             'progress_hooks': [download_progress_hook],
         }
@@ -103,7 +123,7 @@ def download_with_progress(url, best_video, best_audio, video_title=None, proxy=
         # 下载音频流
         audio_opts = {
             'format': best_audio['format_id'],
-            'outtmpl': audio_filename,
+            'outtmpl': str(audio_filename),  # 转换为字符串
             'proxy': proxy,
             'progress_hooks': [download_progress_hook],
         }
@@ -116,15 +136,15 @@ def download_with_progress(url, best_video, best_audio, video_title=None, proxy=
         print(f"输出文件: {output_filename}")
         ffmpeg_process = subprocess.Popen([
             'ffmpeg',
-            '-i', video_filename,
-            '-i', audio_filename,
+            '-i', str(video_filename),
+            '-i', str(audio_filename),
             '-c:v', 'copy',           # 复制视频流，不重新编码
             '-c:a', 'aac',            # 将音频转换为AAC编码（MP4容器兼容）
             '-b:a', '192k',           # 设置音频比特率
             '-map', '0:v:0',          # 选择第一个文件的视频流
             '-map', '1:a:0',          # 选择第二个文件的音频流
             '-movflags', '+faststart', # 优化MP4文件结构
-            output_filename
+            str(output_filename)
         ])
         ffmpeg_process.wait()  # 等待进程完成
         
@@ -133,13 +153,13 @@ def download_with_progress(url, best_video, best_audio, video_title=None, proxy=
         
         # 清理临时文件的部分
         for temp_file in [video_filename, audio_filename]:
-            if os.path.exists(temp_file):
+            if temp_file.exists():
                 max_retries = 5  # 增加重试次数
                 retry_delay = 1  # 减少每次重试的等待时间
                 for attempt in range(max_retries):
                     try:
-                        os.close(os.open(temp_file, os.O_RDONLY))  # 确保文件句柄被关闭
-                        os.remove(temp_file)
+                        # 使用pathlib的unlink方法删除文件
+                        temp_file.unlink()
                         break
                     except OSError as e:
                         if attempt == max_retries - 1:  # 最后一次尝试
@@ -147,7 +167,7 @@ def download_with_progress(url, best_video, best_audio, video_title=None, proxy=
                         else:
                             time.sleep(retry_delay)
                             continue
-        return True, output_filename
+        return True, str(output_filename)
         
     except Exception as e:
         print(f"\n下载或合并出错: {str(e)}")
@@ -382,11 +402,11 @@ def download_and_install_ffmpeg(proxy=None):
     temp_dir = None
     try:
         print("\n正在下载 FFmpeg...")
-        temp_dir = os.path.join(os.getcwd(), 'temp_ffmpeg')
-        os.makedirs(temp_dir, exist_ok=True)
+        temp_dir = Path.cwd() / 'temp_ffmpeg'
+        temp_dir.mkdir(exist_ok=True)
         
-        zip_path = os.path.join(temp_dir, "ffmpeg.zip")
-        extract_path = os.path.join(temp_dir, "ffmpeg")
+        zip_path = temp_dir / "ffmpeg.zip"
+        extract_path = temp_dir / "ffmpeg"
         
         # FFmpeg 下载链接
         download_urls = [
@@ -400,15 +420,15 @@ def download_and_install_ffmpeg(proxy=None):
             max_retries = 300
             for retry in range(max_retries):
                 try:
-                    if download_with_resume(url, zip_path, proxy):
+                    if download_with_resume(url, str(zip_path), proxy):
                         # 验证下载的文件
-                        if os.path.exists(zip_path) and zipfile.is_zipfile(zip_path):
+                        if zip_path.exists() and zipfile.is_zipfile(zip_path):
                             download_success = True
                             break
                         else:
                             print(f"\n下载的文件无效,正在重试({retry + 1}/{max_retries})...")
-                            if os.path.exists(zip_path):
-                                os.remove(zip_path)
+                            if zip_path.exists():
+                                zip_path.unlink()
                 except Exception as e:
                     print(f"\n下载出错: {str(e)}")
                     if retry < max_retries - 1:
@@ -433,13 +453,13 @@ def download_and_install_ffmpeg(proxy=None):
             print("无法找到 FFmpeg 目录")
             return False
             
-        bin_path = os.path.join(extract_path, ffmpeg_dirs[0], "bin")
+        bin_path = extract_path / ffmpeg_dirs[0] / "bin"
         
         # 复制必要的可执行文件到当前目录
         for file in ['ffmpeg.exe', 'ffprobe.exe']:
-            src = os.path.join(bin_path, file)
-            dst = os.path.join(os.getcwd(), file)
-            if os.path.exists(src):
+            src = bin_path / file
+            dst = Path.cwd() / file
+            if src.exists():
                 shutil.copy2(src, dst)
                 
         print("FFmpeg 文件已复制到当前目录！")
@@ -450,7 +470,7 @@ def download_and_install_ffmpeg(proxy=None):
         return False
     finally:
         # 清理临时文件
-        if temp_dir and os.path.exists(temp_dir):
+        if temp_dir and temp_dir.exists():
             try:
                 shutil.rmtree(temp_dir)
             except Exception as e:
@@ -458,11 +478,11 @@ def download_and_install_ffmpeg(proxy=None):
 
 def check_ffmpeg(proxy=None):
     """ 检查当前目录或系统是否安装了 ffmpeg """
-    current_dir = os.getcwd()
-    ffmpeg_path = os.path.join(current_dir, 'ffmpeg.exe')
-    ffprobe_path = os.path.join(current_dir, 'ffprobe.exe')
+    current_dir = Path.cwd()
+    ffmpeg_path = current_dir / 'ffmpeg.exe'
+    ffprobe_path = current_dir / 'ffprobe.exe'
     
-    if os.path.exists(ffmpeg_path) and os.path.exists(ffprobe_path):
+    if ffmpeg_path.exists() and ffprobe_path.exists():
         return True
         
     try:
