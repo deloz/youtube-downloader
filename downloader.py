@@ -9,6 +9,7 @@ import zipfile
 import shutil
 import time
 import requests
+import string
 
 def get_available_formats(url, proxy=None):
     """ 获取所有可用格式 """
@@ -21,7 +22,7 @@ def get_available_formats(url, proxy=None):
         info_dict = ydl.extract_info(url, download=False)
         formats = info_dict.get('formats', [])
     
-    return formats
+    return formats, info_dict
 
 def select_best_formats(formats):
     """ 选择最佳视频和音频格式 """
@@ -54,14 +55,38 @@ def select_best_formats(formats):
 
     return best_video, best_audio
 
-def download_with_progress(url, best_video, best_audio, output_filename='downloaded_video.mp4', proxy=None):
+def sanitize_filename(filename):
+    """清理文件名，移除非法字符"""
+    # 保留英文字母、数字、中文字符和一些基本符号，替换其他字符为下划线
+    valid_chars = f'-_.() {string.ascii_letters}{string.digits}，。：！？'
+    sanitized = ''.join(c if c in valid_chars else '_' for c in filename)
+    # 移除可能导致问题的前导和尾随空格与点号
+    sanitized = sanitized.strip('. ')
+    # 如果文件名变成空字符串，使用默认名称
+    if not sanitized:
+        sanitized = "video"
+    return sanitized
+
+def download_with_progress(url, best_video, best_audio, video_title=None, proxy=None):
     """ 下载视频并显示进度 """
+    # 创建下载目录
+    download_dir = os.path.join(os.getcwd(), "downloads")
+    os.makedirs(download_dir, exist_ok=True)
+    
+    # 处理文件名
+    if video_title:
+        # 清理文件名中的非法字符
+        safe_title = sanitize_filename(video_title)
+        output_filename = os.path.join(download_dir, f"{safe_title}.mp4")
+    else:
+        output_filename = os.path.join(download_dir, "downloaded_video.mp4")
+    
     # 根据实际格式设置正确的扩展名
     video_ext = best_video.get('ext', 'mp4')
     audio_ext = best_audio.get('ext', 'webm')
     
-    video_filename = f"temp_video_{best_video['format_id']}.{video_ext}"
-    audio_filename = f"temp_audio_{best_audio['format_id']}.{audio_ext}"
+    video_filename = os.path.join(download_dir, f"temp_video_{best_video['format_id']}.{video_ext}")
+    audio_filename = os.path.join(download_dir, f"temp_audio_{best_audio['format_id']}.{audio_ext}")
     
     try:
         # 下载视频流
@@ -88,6 +113,7 @@ def download_with_progress(url, best_video, best_audio, output_filename='downloa
         
         # 使用 ffmpeg 合并视频和音频，完全保留原始编码
         print("\n正在合并视频和音频...")
+        print(f"输出文件: {output_filename}")
         ffmpeg_process = subprocess.Popen([
             'ffmpeg',
             '-i', video_filename,
@@ -121,11 +147,11 @@ def download_with_progress(url, best_video, best_audio, output_filename='downloa
                         else:
                             time.sleep(retry_delay)
                             continue
-        return True
+        return True, output_filename
         
     except Exception as e:
         print(f"\n下载或合并出错: {str(e)}")
-        return False
+        return False, None
 
 def get_video_properties(file_path):
     """ 获取视频属性 """
@@ -476,16 +502,21 @@ def main():
         video_url = get_youtube_url()
         
         print("\n获取视频信息中...")
-        available_formats = get_available_formats(video_url, proxy)
+        available_formats, info_dict = get_available_formats(video_url, proxy)
+        
+        # 获取视频标题
+        video_title = info_dict.get('title', 'downloaded_video')
+        print(f"视频标题: {video_title}")
         
         best_video, best_audio = select_best_formats(available_formats)
         if not best_video or not best_audio:
             print("无法获取最佳视频或音频格式")
             return
             
-        output_file = 'downloaded_video.mp4'
-        if download_with_progress(video_url, best_video, best_audio, output_file, proxy):
+        download_success, output_file = download_with_progress(video_url, best_video, best_audio, video_title, proxy)
+        if download_success:
             print("\n\n下载完成!")
+            print(f"文件保存在: {output_file}")
             
             video_info, audio_info = get_video_properties(output_file)
             if video_info and audio_info:
