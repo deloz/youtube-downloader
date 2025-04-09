@@ -4,31 +4,39 @@ import re
 import os
 import platform
 import winreg
-import urllib.request
 import zipfile
 import shutil
 import time
 import requests
-import string
 import argparse
 from pathlib import Path
+import asyncio
+import concurrent.futures
+from typing import Dict, List, Tuple, Optional, Any, Union
 
 
-def get_available_formats(url, proxy=None):
+async def get_available_formats(
+    url: str, proxy: Optional[str] = None
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """获取所有可用格式"""
     ydl_opts = {
         "listformats": True,  # 列出所有可用格式
         "proxy": proxy,  # 设置代理
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info_dict = ydl.extract_info(url, download=False)
+    loop = asyncio.get_event_loop()
+    async with asyncio.Lock():
+        info_dict = await loop.run_in_executor(
+            None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False)
+        )
         formats = info_dict.get("formats", [])
 
     return formats, info_dict
 
 
-def select_best_formats(formats):
+def select_best_formats(
+    formats: List[Dict[str, Any]]
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """选择最佳视频和音频格式"""
     best_video = None
     best_audio = None
@@ -64,7 +72,7 @@ def select_best_formats(formats):
     return best_video, best_audio
 
 
-def sanitize_filename(filename):
+def sanitize_filename(filename: str) -> str:
     """清理文件名，移除非法字符"""
     path = Path(filename)
     stem = path.stem
@@ -99,7 +107,7 @@ def sanitize_filename(filename):
     return sanitized_stem + suffix
 
 
-def download_progress_hook(d):
+def download_progress_hook(d: Dict[str, Any]) -> None:
     """下载进度回调函数"""
     if d["status"] == "downloading":
         total = d.get("total_bytes")
@@ -119,80 +127,111 @@ def download_progress_hook(d):
             )
 
 
-def download_audio(url, audio_format, filename, proxy=None):
+async def download_audio(
+    url: str,
+    audio_format: Dict[str, Any],
+    filename: Union[str, Path],
+    proxy: Optional[str] = None,
+    concurrent_fragments: int = 3,
+) -> Tuple[bool, Optional[Union[str, Path]]]:
     """下载音频流"""
     try:
         audio_opts = {
             "format": audio_format["format_id"],
             "outtmpl": str(filename),
             "proxy": proxy,
+            "concurrent_fragment_downloads": concurrent_fragments,  # 并行下载片段
             "progress_hooks": [download_progress_hook],
         }
         print("\n正在下载音频流...")
-        with yt_dlp.YoutubeDL(audio_opts) as ydl:
-            ydl.download([url])
+
+        loop = asyncio.get_event_loop()
+        async with asyncio.Lock():
+            await loop.run_in_executor(
+                None, lambda: yt_dlp.YoutubeDL(audio_opts).download([url])
+            )
         return True, filename
     except Exception as e:
         print(f"\n下载音频出错: {str(e)}")
         return False, None
 
 
-def download_video(url, video_format, filename, proxy=None):
+async def download_video(
+    url: str,
+    video_format: Dict[str, Any],
+    filename: Union[str, Path],
+    proxy: Optional[str] = None,
+    concurrent_fragments: int = 3,
+) -> Tuple[bool, Optional[Union[str, Path]]]:
     """下载视频流"""
     try:
         video_opts = {
             "format": video_format["format_id"],
             "outtmpl": str(filename),
             "proxy": proxy,
+            "concurrent_fragment_downloads": concurrent_fragments,  # 并行下载片段
             "progress_hooks": [download_progress_hook],
         }
         print("\n正在下载视频流...")
-        with yt_dlp.YoutubeDL(video_opts) as ydl:
-            ydl.download([url])
+
+        loop = asyncio.get_event_loop()
+        async with asyncio.Lock():
+            await loop.run_in_executor(
+                None, lambda: yt_dlp.YoutubeDL(video_opts).download([url])
+            )
         return True, filename
     except Exception as e:
         print(f"\n下载视频出错: {str(e)}")
         return False, None
 
 
-def merge_audio_video(video_file, audio_file, output_file):
+async def merge_audio_video(
+    video_file: Union[str, Path],
+    audio_file: Union[str, Path],
+    output_file: Union[str, Path],
+) -> bool:
     """合并音频和视频"""
     try:
         print("\n正在合并视频和音频...")
         print(f"输出文件: {output_file}")
-        ffmpeg_process = subprocess.Popen(
-            [
-                "ffmpeg",
-                "-i",
-                str(video_file),
-                "-i",
-                str(audio_file),
-                "-c:v",
-                "copy",  # 复制视频流，不重新编码
-                "-c:a",
-                "aac",  # 将音频转换为AAC编码（MP4容器兼容）
-                "-b:a",
-                "192k",  # 设置音频比特率
-                "-map",
-                "0:v:0",  # 选择第一个文件的视频流
-                "-map",
-                "1:a:0",  # 选择第二个文件的音频流
-                "-movflags",
-                "+faststart",  # 优化MP4文件结构
-                str(output_file),
-            ]
+
+        loop = asyncio.get_event_loop()
+        ffmpeg_process = await loop.run_in_executor(
+            None,
+            lambda: subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-i",
+                    str(video_file),
+                    "-i",
+                    str(audio_file),
+                    "-c:v",
+                    "copy",  # 复制视频流，不重新编码
+                    "-c:a",
+                    "aac",  # 将音频转换为AAC编码（MP4容器兼容）
+                    "-b:a",
+                    "192k",  # 设置音频比特率
+                    "-map",
+                    "0:v:0",  # 选择第一个文件的视频流
+                    "-map",
+                    "1:a:0",  # 选择第二个文件的音频流
+                    "-movflags",
+                    "+faststart",  # 优化MP4文件结构
+                    str(output_file),
+                ]
+            ),
         )
-        ffmpeg_process.wait()  # 等待进程完成
+        await loop.run_in_executor(None, ffmpeg_process.wait)  # 等待进程完成
         return True
     except Exception as e:
         print(f"\n合并出错: {str(e)}")
         return False
 
 
-def clean_temp_files(file_list):
+async def clean_temp_files(file_list: List[Union[str, Path]]) -> None:
     """清理临时文件"""
     # 在删除文件前先等待一小段时间
-    time.sleep(1)  # 给系统一些时间完全释放文件句柄
+    await asyncio.sleep(1)  # 给系统一些时间完全释放文件句柄
 
     for temp_file in file_list:
         path_file = Path(temp_file)
@@ -208,25 +247,29 @@ def clean_temp_files(file_list):
                     if attempt == max_retries - 1:  # 最后一次尝试
                         print(f"警告：无法删除临时文件 {temp_file}: {e}")
                     else:
-                        time.sleep(retry_delay)
+                        await asyncio.sleep(retry_delay)
                         continue
 
 
-def download_with_progress(
-    url,
-    best_video,
-    best_audio,
-    video_title=None,
-    proxy=None,
-    only_audio=False,
-    playlist_dir=None,
-):
+async def download_with_progress(
+    url: str,
+    best_video: Optional[Dict[str, Any]],
+    best_audio: Dict[str, Any],
+    video_title: Optional[str] = None,
+    proxy: Optional[str] = None,
+    only_audio: bool = False,
+    playlist_dir: Optional[str] = None,
+    concurrent_fragments: int = 3,
+) -> Tuple[bool, Optional[str]]:
     """下载视频并显示进度"""
     # 创建下载目录
     download_dir = Path.cwd() / "downloads"
     if playlist_dir:
         download_dir = download_dir / playlist_dir
     download_dir.mkdir(exist_ok=True, parents=True)
+
+    # 从URL提取视频ID，用于临时文件命名
+    video_id = extract_video_id(url) or "unknown"
 
     # 处理文件名
     if video_title:
@@ -235,75 +278,85 @@ def download_with_progress(
     else:
         safe_title = "downloaded_video"
 
+    # 使用视频ID命名临时文件
     # 根据实际格式设置正确的扩展名
     audio_ext = best_audio.get("ext", "webm")
-    audio_filename = (
-        download_dir / f"{safe_title}_{best_audio['format_id']}.{audio_ext}"
-    )
+    audio_filename = download_dir / f"{video_id}_{best_audio['format_id']}.{audio_ext}"
 
     # 如果只下载音频
     if only_audio:
-        success, audio_file = download_audio(url, best_audio, audio_filename, proxy)
+        success, audio_file = await download_audio(
+            url, best_audio, audio_filename, proxy, concurrent_fragments
+        )
         if success:
-            # 设置输出文件名
+            # 设置输出文件名（最终文件仍使用标题，包括前缀）
             output_filename = download_dir / f"{safe_title}.mp3"
 
             # 转换为MP3格式
             print("\n正在转换为MP3格式...")
-            ffmpeg_process = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-i",
-                    str(audio_file),
-                    "-vn",  # 移除视频流
-                    "-c:a",
-                    "libmp3lame",  # MP3编码器
-                    "-q:a",
-                    "2",  # 音频质量设置 (0-9, 0是最高质量)
-                    str(output_filename),
-                ]
+            loop = asyncio.get_event_loop()
+            ffmpeg_process = await loop.run_in_executor(
+                None,
+                lambda: subprocess.Popen(
+                    [
+                        "ffmpeg",
+                        "-i",
+                        str(audio_file),
+                        "-vn",  # 移除视频流
+                        "-c:a",
+                        "libmp3lame",  # MP3编码器
+                        "-q:a",
+                        "2",  # 音频质量设置 (0-9, 0是最高质量)
+                        str(output_filename),
+                    ]
+                ),
             )
-            ffmpeg_process.wait()
+            await loop.run_in_executor(None, ffmpeg_process.wait)
 
             # 清理临时文件
-            clean_temp_files([audio_file])
+            await clean_temp_files([audio_file])
             return True, str(output_filename)
         return False, None
 
     # 下载视频和音频
     video_ext = best_video.get("ext", "mp4")
-    video_filename = (
-        download_dir / f"{safe_title}_{best_video['format_id']}.{video_ext}"
-    )
+    video_filename = download_dir / f"{video_id}_{best_video['format_id']}.{video_ext}"
+    # 保留前缀的输出文件名
     output_filename = download_dir / f"{safe_title}.mp4"
 
     # 下载视频
-    video_success, video_file = download_video(url, best_video, video_filename, proxy)
+    video_success, video_file = await download_video(
+        url, best_video, video_filename, proxy, concurrent_fragments
+    )
     if not video_success:
         return False, None
 
     # 下载音频
-    audio_success, audio_file = download_audio(url, best_audio, audio_filename, proxy)
+    audio_success, audio_file = await download_audio(
+        url, best_audio, audio_filename, proxy, concurrent_fragments
+    )
     if not audio_success:
         # 清理已下载的视频文件
-        clean_temp_files([video_file])
+        await clean_temp_files([video_file])
         return False, None
 
     # 合并视频和音频
-    if merge_audio_video(video_file, audio_file, output_filename):
+    if await merge_audio_video(video_file, audio_file, output_filename):
         # 清理临时文件
-        clean_temp_files([video_file, audio_file])
+        await clean_temp_files([video_file, audio_file])
         return True, str(output_filename)
 
     return False, None
 
 
-def get_video_properties(file_path):
+async def get_video_properties(file_path: str) -> Tuple[Optional[str], Optional[str]]:
     """获取视频属性"""
 
     try:
-        video_info = (
-            subprocess.check_output(
+        loop = asyncio.get_event_loop()
+        video_info = await loop.run_in_executor(
+            None,
+            lambda: subprocess.check_output(
                 [
                     "ffprobe",
                     "-v",
@@ -318,11 +371,12 @@ def get_video_properties(file_path):
                 ]
             )
             .decode("utf-8")
-            .strip()
+            .strip(),
         )
 
-        audio_info = (
-            subprocess.check_output(
+        audio_info = await loop.run_in_executor(
+            None,
+            lambda: subprocess.check_output(
                 [
                     "ffprobe",
                     "-v",
@@ -337,7 +391,7 @@ def get_video_properties(file_path):
                 ]
             )
             .decode("utf-8")
-            .strip()
+            .strip(),
         )
 
         return video_info, audio_info
@@ -347,8 +401,11 @@ def get_video_properties(file_path):
 
 
 def compare_formats(
-    downloaded_video_info, downloaded_audio_info, best_video, best_audio
-):
+    downloaded_video_info: str,
+    downloaded_audio_info: str,
+    best_video: Optional[Dict[str, Any]],
+    best_audio: Dict[str, Any],
+) -> Tuple[bool, bool]:
     """对比视频和音频格式"""
 
     video_match = False
@@ -442,29 +499,6 @@ def get_youtube_url():
         print("请输入一个有效的YouTube视频或播放列表URL。")
 
 
-def get_playlist_info(url, proxy=None):
-    """获取播放列表信息"""
-    ydl_opts = {
-        "extract_flat": True,  # 不下载视频，只获取基本信息
-        "proxy": proxy,
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(url, download=False)
-
-            # 检查是否是播放列表
-            if "entries" in info_dict:
-                playlist_title = info_dict.get("title", "playlist")
-                entries = info_dict["entries"]
-                return True, playlist_title, entries
-            else:
-                return False, None, None
-    except Exception as e:
-        print(f"获取播放列表信息失败: {str(e)}")
-        return False, None, None
-
-
 def get_windows_proxy():
     """获取Windows系统代理设置"""
     try:
@@ -524,7 +558,9 @@ def get_proxy_config():
     return None
 
 
-def download_with_resume(url, file_path, proxy=None):
+async def download_with_resume(
+    url: str, file_path: str, proxy: Optional[str] = None
+) -> bool:
     """支持断点续传的下载函数"""
     try:
         # 设置请求头和代理
@@ -540,7 +576,11 @@ def download_with_resume(url, file_path, proxy=None):
             headers["Range"] = f"bytes={file_size}-"
 
         # 发送请求
-        response = requests.get(url, headers=headers, proxies=proxies, stream=True)
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: requests.get(url, headers=headers, proxies=proxies, stream=True),
+        )
         total_size = int(response.headers.get("content-length", 0)) + file_size
 
         mode = "ab" if file_size > 0 else "wb"
@@ -556,9 +596,21 @@ def download_with_resume(url, file_path, proxy=None):
             last_print_time = time.time()
             last_downloaded = downloaded
 
-            for chunk in response.iter_content(chunk_size=chunk_size):
+            # 创建迭代器
+            chunks_iterator = response.iter_content(chunk_size=chunk_size)
+
+            while True:
+                # 异步获取下一个数据块
+                try:
+                    chunk = await loop.run_in_executor(
+                        None, lambda: next(chunks_iterator, None)
+                    )
+                except StopIteration:
+                    break
+
                 if not chunk:
                     break
+
                 f.write(chunk)
                 downloaded += len(chunk)
 
@@ -600,7 +652,7 @@ def download_with_resume(url, file_path, proxy=None):
         return False
 
 
-def download_and_install_ffmpeg(proxy=None):
+async def download_and_install_ffmpeg(proxy: Optional[str] = None) -> bool:
     """下载并安装 FFmpeg 到当前目录"""
     if platform.system() != "Windows":
         print("自动安装只支持 Windows 系统")
@@ -627,7 +679,7 @@ def download_and_install_ffmpeg(proxy=None):
             max_retries = 300
             for retry in range(max_retries):
                 try:
-                    if download_with_resume(url, str(zip_path), proxy):
+                    if await download_with_resume(url, str(zip_path), proxy):
                         # 验证下载的文件
                         if zip_path.exists() and zipfile.is_zipfile(zip_path):
                             download_success = True
@@ -642,7 +694,7 @@ def download_and_install_ffmpeg(proxy=None):
                     print(f"\n下载出错: {str(e)}")
                     if retry < max_retries - 1:
                         print(f"等待 5 秒后重试({retry + 1}/{max_retries})...")
-                        time.sleep(5)
+                        await asyncio.sleep(5)
                     continue
 
             if download_success:
@@ -654,8 +706,9 @@ def download_and_install_ffmpeg(proxy=None):
 
         # 解压后只复制需要的文件到当前目录
         print("正在解压并复制必要文件...")
+        loop = asyncio.get_event_loop()
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(extract_path)
+            await loop.run_in_executor(None, zip_ref.extractall, extract_path)
 
         ffmpeg_dirs = [d for d in os.listdir(extract_path) if "ffmpeg" in d.lower()]
         if not ffmpeg_dirs:
@@ -669,7 +722,7 @@ def download_and_install_ffmpeg(proxy=None):
             src = bin_path / file
             dst = Path.cwd() / file
             if src.exists():
-                shutil.copy2(src, dst)
+                await loop.run_in_executor(None, shutil.copy2, src, dst)
 
         print("FFmpeg 文件已复制到当前目录！")
         return True
@@ -681,12 +734,12 @@ def download_and_install_ffmpeg(proxy=None):
         # 清理临时文件
         if temp_dir and temp_dir.exists():
             try:
-                shutil.rmtree(temp_dir)
+                await loop.run_in_executor(None, shutil.rmtree, temp_dir)
             except Exception as e:
                 print(f"清理临时文件时出错: {str(e)}")
 
 
-def check_ffmpeg(proxy=None):
+async def check_ffmpeg(proxy: Optional[str] = None) -> bool:
     """检查当前目录或系统是否安装了 ffmpeg"""
     current_dir = Path.cwd()
     ffmpeg_path = current_dir / "ffmpeg.exe"
@@ -696,8 +749,12 @@ def check_ffmpeg(proxy=None):
         return True
 
     try:
-        subprocess.run(
-            ["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            ),
         )
         return True
     except FileNotFoundError:
@@ -705,7 +762,7 @@ def check_ffmpeg(proxy=None):
         if platform.system() == "Windows":
             print("\n是否要下载 FFmpeg 到当前目录？(y/n): ", end="")
             if input().strip().lower() == "y":
-                return download_and_install_ffmpeg(proxy)
+                return await download_and_install_ffmpeg(proxy)
             else:
                 print("\n请手动下载 FFmpeg:")
                 print("1. 访问 https://github.com/BtbN/FFmpeg-Builds/releases")
@@ -723,83 +780,217 @@ def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="YouTube视频下载器")
     parser.add_argument("--only-audio", action="store_true", help="只下载音频")
+    parser.add_argument(
+        "--concurrent", "-c", type=int, default=1, help="并行下载数量(1-10)，默认为1"
+    )
+    parser.add_argument(
+        "--fragments",
+        "-f",
+        type=int,
+        default=3,
+        help="单个视频的并行片段下载数量(1-10)，默认为3",
+    )
     return parser.parse_args()
 
 
-def download_playlist_with_ytdlp(url, proxy=None, only_audio=False):
-    """使用yt-dlp内置的播放列表处理功能下载整个播放列表"""
-    print("\n开始下载播放列表...")
-
-    # 创建下载目录
-    download_dir = Path.cwd() / "downloads"
-    download_dir.mkdir(exist_ok=True)
-
-    # 设置下载选项
+async def get_playlist_info(
+    url: str, proxy: Optional[str] = None
+) -> Tuple[bool, Optional[str], Optional[List[Dict[str, Any]]]]:
+    """获取播放列表信息"""
     ydl_opts = {
+        "extract_flat": True,  # 不下载视频，只获取基本信息
         "proxy": proxy,
-        "ignoreerrors": True,  # 忽略错误，继续下载其他视频
-        "nooverwrites": True,  # 不覆盖已存在的文件
     }
 
-    if only_audio:
-        # 音频下载设置
-        ydl_opts.update(
-            {
-                "format": "bestaudio/best",
-                "postprocessors": [
-                    {
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": "mp3",
-                        "preferredquality": "192",
-                    }
-                ],
-                "outtmpl": str(
-                    download_dir / "%(playlist)s/%(playlist_index)s - %(title)s.%(ext)s"
-                ),
-            }
-        )
-    else:
-        # 视频下载设置
-        ydl_opts.update(
-            {
-                "format": "bestvideo+bestaudio/best",  # 最佳视频+音频质量，或者仅最佳质量
-                "merge_output_format": "mp4",  # 输出格式为MP4
-                "outtmpl": str(
-                    download_dir / "%(playlist)s/%(playlist_index)s - %(title)s.%(ext)s"
-                ),
-            }
-        )
-
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(url, download=True)
+        loop = asyncio.get_event_loop()
+        async with asyncio.Lock():
+            info_dict = await loop.run_in_executor(
+                None,
+                lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False),
+            )
 
-            # 获取播放列表标题
+            # 检查是否是播放列表
             if "entries" in info_dict:
                 playlist_title = info_dict.get("title", "playlist")
-                entries = list(info_dict["entries"])
-                count = len(entries)
-
-                # 过滤掉下载失败的项 (None)
-                successful = [e for e in entries if e is not None]
-                successful_count = len(successful)
-
-                print(f"\n播放列表下载完成: {playlist_title}")
-                print(f"下载[成功/总数]: {successful_count}/{count}")
-
-                if successful_count > 0:
-                    safe_title = sanitize_filename(playlist_title)
-                    print(f"文件保存在: downloads/{safe_title}/")
-                return True
+                entries = info_dict["entries"]
+                return True, playlist_title, entries
             else:
-                print("无法获取播放列表信息或URL不是播放列表")
-                return False
+                return False, None, None
     except Exception as e:
-        print(f"\n下载播放列表出错: {str(e)}")
+        print(f"获取播放列表信息失败: {str(e)}")
+        return False, None, None
+
+
+async def download_single_video_async(
+    video_info: Dict[str, Any],
+    output_dir: str,
+    proxy: Optional[str] = None,
+    only_audio: bool = False,
+    concurrent_fragments: int = 3,
+) -> bool:
+    """异步下载单个视频"""
+    video_url = (
+        video_info.get("url")
+        or f"https://www.youtube.com/watch?v={video_info.get('id')}"
+    )
+    video_title = video_info.get("title")
+    video_index = video_info.get("playlist_index", "")
+
+    if video_index:
+        prefix = f"{video_index:02d}-"
+    else:
+        prefix = ""
+
+    if not video_title:
+        video_title = f"video-{video_info.get('id', 'unknown')}"
+
+    # 显示正在下载的视频信息
+    print(f"\n开始下载: {prefix}{video_title}")
+
+    try:
+        # 获取视频格式
+        available_formats, info_dict = await get_available_formats(video_url, proxy)
+
+        # 获取最佳视频和音频格式
+        best_video, best_audio = select_best_formats(available_formats)
+
+        if not best_audio:
+            print(f"无法获取音频格式: {video_title}")
+            return False
+
+        if not only_audio and not best_video:
+            print(f"无法获取视频格式: {video_title}")
+            return False
+
+        # 下载视频
+        download_success, output_file = await download_with_progress(
+            video_url,
+            best_video,
+            best_audio,
+            f"{prefix}{video_title}",
+            proxy,
+            only_audio,
+            output_dir,
+            concurrent_fragments,
+        )
+
+        if download_success:
+            print(f"\n视频下载完成: {prefix}{video_title}")
+            return True
+        else:
+            print(f"\n视频下载失败: {prefix}{video_title}")
+            return False
+
+    except Exception as e:
+        print(f"\n下载视频时出错 ({prefix}{video_title}): {str(e)}")
         return False
 
 
-def main():
+async def download_playlist_async(
+    url: str,
+    proxy: Optional[str] = None,
+    only_audio: bool = False,
+    concurrent_downloads: int = 3,
+    concurrent_fragments: int = 3,
+) -> bool:
+    """异步下载播放列表"""
+    # 获取播放列表信息
+    is_playlist, playlist_title, entries = await get_playlist_info(url, proxy)
+
+    if not is_playlist or not entries:
+        print("无法获取播放列表信息或URL不是播放列表")
+        return False
+
+    # 创建下载目录
+    safe_playlist_title = sanitize_filename(playlist_title)
+    download_dir = Path.cwd() / "downloads" / safe_playlist_title
+    download_dir.mkdir(exist_ok=True, parents=True)
+
+    print(f"\n开始下载播放列表: {playlist_title}")
+    print(f"共 {len(entries)} 个视频，设置并行下载数量: {concurrent_downloads}")
+
+    # 限制最大并发数
+    effective_concurrent = min(concurrent_downloads, len(entries))
+
+    # 使用线程池执行器运行异步任务
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=effective_concurrent
+    ) as executor:
+        # 使用队列管理下载任务
+        download_queue = asyncio.Queue()
+
+        # 添加所有视频到队列
+        for entry in entries:
+            await download_queue.put(entry)
+
+        # 创建并发任务
+        tasks = []
+        for i in range(effective_concurrent):
+            task = asyncio.create_task(
+                worker(
+                    i,
+                    download_queue,
+                    safe_playlist_title,
+                    proxy,
+                    only_audio,
+                    concurrent_fragments,
+                )
+            )
+            tasks.append(task)
+
+        # 等待所有任务完成
+        results = await asyncio.gather(*tasks)
+
+        # 计算成功下载数量
+        success_count = sum(r for r in results)
+
+    print(f"\n播放列表下载完成: {playlist_title}")
+    print(f"下载[成功/总数]: {success_count}/{len(entries)}")
+    print(f"文件保存在: downloads/{safe_playlist_title}/")
+
+    return success_count > 0
+
+
+async def worker(
+    worker_id: int,
+    queue: asyncio.Queue,
+    output_dir: str,
+    proxy: Optional[str] = None,
+    only_audio: bool = False,
+    concurrent_fragments: int = 3,
+) -> int:
+    """工作线程，从队列获取视频并下载"""
+    success_count = 0
+
+    while not queue.empty():
+        try:
+            # 获取下一个要下载的视频
+            entry = await queue.get()
+
+            print(
+                f"工作线程 {worker_id+1}: 开始下载 {entry.get('title', entry.get('id', 'unknown'))}"
+            )
+
+            # 下载视频
+            if await download_single_video_async(
+                entry, output_dir, proxy, only_audio, concurrent_fragments
+            ):
+                success_count += 1
+
+        except asyncio.CancelledError:
+            # 任务被取消
+            break
+        except Exception as e:
+            print(f"工作线程 {worker_id+1} 出错: {str(e)}")
+        finally:
+            # 标记任务完成
+            queue.task_done()
+
+    return success_count
+
+
+async def main():
     try:
         # 解析命令行参数
         args = parse_arguments()
@@ -810,11 +1001,27 @@ def main():
         if args.only_audio:
             print("已启用仅下载音频模式")
 
+        # 检查并发下载参数是否有效
+        concurrent_downloads = args.concurrent
+        if concurrent_downloads < 1 or concurrent_downloads > 10:
+            print(f"并行下载数量({concurrent_downloads})超出范围，已重置为1")
+            concurrent_downloads = 1
+        elif concurrent_downloads > 1:
+            print(f"已设置并行下载数量: {concurrent_downloads}")
+
+        # 检查并发片段下载参数是否有效
+        concurrent_fragments = args.fragments
+        if concurrent_fragments < 1 or concurrent_fragments > 10:
+            print(f"并行片段下载数量({concurrent_fragments})超出范围，已重置为3")
+            concurrent_fragments = 3
+        else:
+            print(f"已设置单个视频并行片段下载数量: {concurrent_fragments}")
+
         # 先获取代理设置
         proxy = get_proxy_config()
 
         # 检查 ffmpeg 是否安装，传入代理参数
-        if not check_ffmpeg(proxy):
+        if not await check_ffmpeg(proxy):
             print("\n请安装 FFmpeg 后重试")
             return
 
@@ -829,8 +1036,33 @@ def main():
             while True:
                 choice = input(f"\n是否下载整个播放列表? (y/n): ").strip().lower()
                 if choice == "y":
-                    # 使用新的播放列表下载方法
-                    download_playlist_with_ytdlp(url, proxy, args.only_audio)
+                    # 如果未通过命令行参数设置并行下载，则询问用户
+                    if args.concurrent == 1:
+                        # 询问用户想要使用的并发下载数量
+                        while True:
+                            try:
+                                concurrent_input = input(
+                                    "\n请输入并行下载数量(1-10，默认为1): "
+                                ).strip()
+                                if not concurrent_input:  # 用户直接按回车，使用默认值
+                                    break
+                                user_concurrent = int(concurrent_input)
+                                if 1 <= user_concurrent <= 10:
+                                    concurrent_downloads = user_concurrent
+                                    break
+                                else:
+                                    print("请输入1-10之间的数字")
+                            except ValueError:
+                                print("请输入有效的数字")
+
+                    # 使用新的播放列表下载方法，传入并发下载数量
+                    await download_playlist_async(
+                        url,
+                        proxy,
+                        args.only_audio,
+                        concurrent_downloads,
+                        concurrent_fragments,
+                    )
                     return
                 elif choice == "n":
                     print("取消下载播放列表")
@@ -840,7 +1072,7 @@ def main():
 
         # 处理单个视频
         print("\n获取视频信息中...")
-        available_formats, info_dict = get_available_formats(url, proxy)
+        available_formats, info_dict = await get_available_formats(url, proxy)
 
         # 获取视频标题
         video_title = info_dict.get("title", "downloaded_video")
@@ -855,8 +1087,14 @@ def main():
             print("无法获取视频格式")
             return
 
-        download_success, output_file = download_with_progress(
-            url, best_video, best_audio, video_title, proxy, args.only_audio
+        download_success, output_file = await download_with_progress(
+            url,
+            best_video,
+            best_audio,
+            video_title,
+            proxy,
+            args.only_audio,
+            concurrent_fragments=concurrent_fragments,
         )
 
         if download_success:
@@ -864,7 +1102,7 @@ def main():
             print(f"文件保存在: {output_file}")
 
             if not args.only_audio:
-                video_info, audio_info = get_video_properties(output_file)
+                video_info, audio_info = await get_video_properties(output_file)
                 if video_info and audio_info:
                     video_match, audio_match = compare_formats(
                         video_info, audio_info, best_video, best_audio
@@ -881,4 +1119,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
