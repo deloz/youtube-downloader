@@ -10,6 +10,7 @@ import shutil
 import time
 import requests
 import string
+import argparse
 from pathlib import Path
 
 def get_available_formats(url, proxy=None):
@@ -87,7 +88,102 @@ def sanitize_filename(filename):
     # 组合处理后的文件名和原始后缀
     return sanitized_stem + suffix
 
-def download_with_progress(url, best_video, best_audio, video_title=None, proxy=None):
+def download_progress_hook(d):
+    """下载进度回调函数"""
+    if d['status'] == 'downloading':
+        total = d.get('total_bytes')
+        downloaded = d.get('downloaded_bytes', 0)
+        speed = d.get('speed', 0)
+        
+        if total:
+            percentage = (downloaded / total) * 100
+            downloaded_mb = downloaded / 1024 / 1024
+            total_mb = total / 1024 / 1024
+            speed_kb = speed / 1024 if speed else 0
+            print(f"\r下载进度: {percentage:.1f}% | "
+                  f"已下载: {downloaded_mb:.2f}MB / {total_mb:.2f}MB | "
+                  f"速度: {speed_kb:.2f}KB/s", end='')
+
+def download_audio(url, audio_format, filename, proxy=None):
+    """下载音频流"""
+    try:
+        audio_opts = {
+            'format': audio_format['format_id'],
+            'outtmpl': str(filename),
+            'proxy': proxy,
+            'progress_hooks': [download_progress_hook],
+        }
+        print("\n正在下载音频流...")
+        with yt_dlp.YoutubeDL(audio_opts) as ydl:
+            ydl.download([url])
+        return True, filename
+    except Exception as e:
+        print(f"\n下载音频出错: {str(e)}")
+        return False, None
+
+def download_video(url, video_format, filename, proxy=None):
+    """下载视频流"""
+    try:
+        video_opts = {
+            'format': video_format['format_id'],
+            'outtmpl': str(filename),
+            'proxy': proxy,
+            'progress_hooks': [download_progress_hook],
+        }
+        print("\n正在下载视频流...")
+        with yt_dlp.YoutubeDL(video_opts) as ydl:
+            ydl.download([url])
+        return True, filename
+    except Exception as e:
+        print(f"\n下载视频出错: {str(e)}")
+        return False, None
+
+def merge_audio_video(video_file, audio_file, output_file):
+    """合并音频和视频"""
+    try:
+        print("\n正在合并视频和音频...")
+        print(f"输出文件: {output_file}")
+        ffmpeg_process = subprocess.Popen([
+            'ffmpeg',
+            '-i', str(video_file),
+            '-i', str(audio_file),
+            '-c:v', 'copy',           # 复制视频流，不重新编码
+            '-c:a', 'aac',            # 将音频转换为AAC编码（MP4容器兼容）
+            '-b:a', '192k',           # 设置音频比特率
+            '-map', '0:v:0',          # 选择第一个文件的视频流
+            '-map', '1:a:0',          # 选择第二个文件的音频流
+            '-movflags', '+faststart', # 优化MP4文件结构
+            str(output_file)
+        ])
+        ffmpeg_process.wait()  # 等待进程完成
+        return True
+    except Exception as e:
+        print(f"\n合并出错: {str(e)}")
+        return False
+
+def clean_temp_files(file_list):
+    """清理临时文件"""
+    # 在删除文件前先等待一小段时间
+    time.sleep(1)  # 给系统一些时间完全释放文件句柄
+    
+    for temp_file in file_list:
+        path_file = Path(temp_file)
+        if path_file.exists():
+            max_retries = 5  # 增加重试次数
+            retry_delay = 1  # 减少每次重试的等待时间
+            for attempt in range(max_retries):
+                try:
+                    # 使用pathlib的unlink方法删除文件
+                    path_file.unlink()
+                    break
+                except OSError as e:
+                    if attempt == max_retries - 1:  # 最后一次尝试
+                        print(f"警告：无法删除临时文件 {temp_file}: {e}")
+                    else:
+                        time.sleep(retry_delay)
+                        continue
+
+def download_with_progress(url, best_video, best_audio, video_title=None, proxy=None, only_audio=False):
     """ 下载视频并显示进度 """
     # 创建下载目录
     download_dir = Path.cwd() / "downloads"
@@ -97,81 +193,61 @@ def download_with_progress(url, best_video, best_audio, video_title=None, proxy=
     if video_title:
         # 清理文件名中的非法字符
         safe_title = sanitize_filename(video_title)
-        output_filename = download_dir / f"{safe_title}.mp4"
     else:
-        output_filename = download_dir / "downloaded_video.mp4"
+        safe_title = "downloaded_video"
     
     # 根据实际格式设置正确的扩展名
-    video_ext = best_video.get('ext', 'mp4')
     audio_ext = best_audio.get('ext', 'webm')
-    
-    video_filename = download_dir / f"{safe_title}_{best_video['format_id']}.{video_ext}"
     audio_filename = download_dir / f"{safe_title}_{best_audio['format_id']}.{audio_ext}"
     
-    try:
-        # 下载视频流
-        video_opts = {
-            'format': best_video['format_id'],
-            'outtmpl': str(video_filename),  # 转换为字符串，因为yt_dlp不支持Path对象
-            'proxy': proxy,
-            'progress_hooks': [download_progress_hook],
-        }
-        print("\n正在下载视频流...")
-        with yt_dlp.YoutubeDL(video_opts) as ydl:
-            ydl.download([url])
-        
-        # 下载音频流
-        audio_opts = {
-            'format': best_audio['format_id'],
-            'outtmpl': str(audio_filename),  # 转换为字符串
-            'proxy': proxy,
-            'progress_hooks': [download_progress_hook],
-        }
-        print("\n正在下载音频流...")
-        with yt_dlp.YoutubeDL(audio_opts) as ydl:
-            ydl.download([url])
-        
-        # 使用 ffmpeg 合并视频和音频，完全保留原始编码
-        print("\n正在合并视频和音频...")
-        print(f"输出文件: {output_filename}")
-        ffmpeg_process = subprocess.Popen([
-            'ffmpeg',
-            '-i', str(video_filename),
-            '-i', str(audio_filename),
-            '-c:v', 'copy',           # 复制视频流，不重新编码
-            '-c:a', 'aac',            # 将音频转换为AAC编码（MP4容器兼容）
-            '-b:a', '192k',           # 设置音频比特率
-            '-map', '0:v:0',          # 选择第一个文件的视频流
-            '-map', '1:a:0',          # 选择第二个文件的音频流
-            '-movflags', '+faststart', # 优化MP4文件结构
-            str(output_filename)
-        ])
-        ffmpeg_process.wait()  # 等待进程完成
-        
-        # 在删除文件前先等待一小段时间
-        time.sleep(1)  # 给系统一些时间完全释放文件句柄
-        
-        # 清理临时文件的部分
-        for temp_file in [video_filename, audio_filename]:
-            if temp_file.exists():
-                max_retries = 5  # 增加重试次数
-                retry_delay = 1  # 减少每次重试的等待时间
-                for attempt in range(max_retries):
-                    try:
-                        # 使用pathlib的unlink方法删除文件
-                        temp_file.unlink()
-                        break
-                    except OSError as e:
-                        if attempt == max_retries - 1:  # 最后一次尝试
-                            print(f"警告：无法删除临时文件 {temp_file}: {e}")
-                        else:
-                            time.sleep(retry_delay)
-                            continue
-        return True, str(output_filename)
-        
-    except Exception as e:
-        print(f"\n下载或合并出错: {str(e)}")
+    # 如果只下载音频
+    if only_audio:
+        success, audio_file = download_audio(url, best_audio, audio_filename, proxy)
+        if success:
+            # 设置输出文件名
+            output_filename = download_dir / f"{safe_title}.mp3"
+            
+            # 转换为MP3格式
+            print("\n正在转换为MP3格式...")
+            ffmpeg_process = subprocess.Popen([
+                'ffmpeg',
+                '-i', str(audio_file),
+                '-vn',                # 移除视频流
+                '-c:a', 'libmp3lame', # MP3编码器
+                '-q:a', '2',          # 音频质量设置 (0-9, 0是最高质量)
+                str(output_filename)
+            ])
+            ffmpeg_process.wait()
+            
+            # 清理临时文件
+            clean_temp_files([audio_file])
+            return True, str(output_filename)
         return False, None
+    
+    # 下载视频和音频
+    video_ext = best_video.get('ext', 'mp4')
+    video_filename = download_dir / f"{safe_title}_{best_video['format_id']}.{video_ext}"
+    output_filename = download_dir / f"{safe_title}.mp4"
+    
+    # 下载视频
+    video_success, video_file = download_video(url, best_video, video_filename, proxy)
+    if not video_success:
+        return False, None
+    
+    # 下载音频
+    audio_success, audio_file = download_audio(url, best_audio, audio_filename, proxy)
+    if not audio_success:
+        # 清理已下载的视频文件
+        clean_temp_files([video_file])
+        return False, None
+    
+    # 合并视频和音频
+    if merge_audio_video(video_file, audio_file, output_filename):
+        # 清理临时文件
+        clean_temp_files([video_file, audio_file])
+        return True, str(output_filename)
+    
+    return False, None
 
 def get_video_properties(file_path):
     """ 获取视频属性 """
@@ -314,21 +390,6 @@ def get_proxy_config():
             print("请输入 y 或 n")
     
     return None
-
-def download_progress_hook(d):
-    if d['status'] == 'downloading':
-        total = d.get('total_bytes')
-        downloaded = d.get('downloaded_bytes', 0)
-        speed = d.get('speed', 0)
-        
-        if total:
-            percentage = (downloaded / total) * 100
-            downloaded_mb = downloaded / 1024 / 1024
-            total_mb = total / 1024 / 1024
-            speed_kb = speed / 1024 if speed else 0
-            print(f"\r下载进度: {percentage:.1f}% | "
-                  f"已下载: {downloaded_mb:.2f}MB / {total_mb:.2f}MB | "
-                  f"速度: {speed_kb:.2f}KB/s", end='')
 
 def download_with_resume(url, file_path, proxy=None):
     """支持断点续传的下载函数"""
@@ -506,10 +567,22 @@ def check_ffmpeg(proxy=None):
             print("macOS: brew install ffmpeg")
         return False
 
+def parse_arguments():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description="YouTube视频下载器")
+    parser.add_argument("--only-audio", action="store_true", help="只下载音频")
+    return parser.parse_args()
+
 def main():
     try:
+        # 解析命令行参数
+        args = parse_arguments()
+        
         print("\nYouTube视频下载器启动...")
         print("="*50 + "\n")
+        
+        if args.only_audio:
+            print("已启用仅下载音频模式")
         
         # 先获取代理设置
         proxy = get_proxy_config()
@@ -529,22 +602,30 @@ def main():
         print(f"视频标题: {video_title}")
         
         best_video, best_audio = select_best_formats(available_formats)
-        if not best_video or not best_audio:
-            print("无法获取最佳视频或音频格式")
+        if not best_audio:
+            print("无法获取音频格式")
             return
             
-        download_success, output_file = download_with_progress(video_url, best_video, best_audio, video_title, proxy)
+        if not args.only_audio and not best_video:
+            print("无法获取视频格式")
+            return
+            
+        download_success, output_file = download_with_progress(
+            video_url, best_video, best_audio, video_title, proxy, args.only_audio
+        )
+        
         if download_success:
             print("\n\n下载完成!")
             print(f"文件保存在: {output_file}")
             
-            video_info, audio_info = get_video_properties(output_file)
-            if video_info and audio_info:
-                video_match, audio_match = compare_formats(video_info, audio_info, best_video, best_audio)
-                if video_match and audio_match:
-                    print("视频和音频格式验证通过")
-                else:
-                    print("警告:下载的视频或音频格式与预期不符")
+            if not args.only_audio:
+                video_info, audio_info = get_video_properties(output_file)
+                if video_info and audio_info:
+                    video_match, audio_match = compare_formats(video_info, audio_info, best_video, best_audio)
+                    if video_match and audio_match:
+                        print("视频和音频格式验证通过")
+                    else:
+                        print("警告:下载的视频或音频格式与预期不符")
         
     except KeyboardInterrupt:
         print("\n\n用户取消下载")
