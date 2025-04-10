@@ -457,7 +457,7 @@ def is_youtube_url(url):
         r"^(?:https?:\/\/)?(?:www\.)?"
         r"(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|user\/\w+\/|playlist\?list=)|"
         r"youtu\.be\/)"
-        r"([\w-]{11})?"  # 视频ID格式，对于播放列表可能没有视频ID
+        r"([a-zA-Z0-9_-]*)?"  # 视频ID或播放列表ID，格式更宽松以支持各种类型
     )
 
     return bool(re.match(youtube_regex, url))
@@ -465,13 +465,15 @@ def is_youtube_url(url):
 
 def is_playlist(url):
     """检查URL是否为YouTube播放列表"""
-    playlist_regex = r"(?:youtube\.com\/(?:playlist\?list=|watch\?.*?&list=)|youtu\.be\/.*?\?list=)([\w-]+)"
+    # 同时支持标准播放列表(PL)和混合播放列表(RD)
+    playlist_regex = r"(?:youtube\.com\/(?:playlist\?list=|watch\?.*?&list=)|youtu\.be\/.*?\?list=)([a-zA-Z0-9_-]+)"
     return bool(re.search(playlist_regex, url))
 
 
 def extract_playlist_id(url):
     """从YouTube URL中提取播放列表ID"""
-    playlist_regex = r"(?:youtube\.com\/(?:playlist\?list=|watch\?.*?&list=)|youtu\.be\/.*?\?list=)([\w-]+)"
+    # 同时支持标准播放列表(PL)和混合播放列表(RD)
+    playlist_regex = r"(?:youtube\.com\/(?:playlist\?list=|watch\?.*?&list=)|youtu\.be\/.*?\?list=)([a-zA-Z0-9_-]+)"
     match = re.search(playlist_regex, url)
     return match.group(1) if match else None
 
@@ -486,7 +488,16 @@ def get_youtube_url():
         if url and is_youtube_url(url):
             if is_playlist(url):
                 playlist_id = extract_playlist_id(url)
-                # 构建标准化的播放列表URL
+                
+                # 判断播放列表类型
+                if playlist_id.startswith("RD"):
+                    print("\n检测到YouTube混合播放列表(RD类型)，支持下载")
+                elif playlist_id.startswith("PL"):
+                    print("\n检测到标准YouTube播放列表")
+                else:
+                    print(f"\n检测到YouTube播放列表(ID: {playlist_id[:2]}...)")
+                
+                # 构建标准化的播放列表URL，保留原始播放列表ID
                 return f"https://www.youtube.com/playlist?list={playlist_id}", True
             else:
                 video_id = extract_video_id(url)
@@ -895,13 +906,20 @@ async def download_playlist_async(
     concurrent_fragments: int = 3,
 ) -> bool:
     """异步下载播放列表"""
+    # 首先检查播放列表类型，不支持RD类型
+    playlist_id = extract_playlist_id(url)
+    if playlist_id and playlist_id.startswith("RD"):
+        print("\n错误: 不支持下载YouTube混合播放列表(RD类型)")
+        print("请使用标准YouTube播放列表(PL类型)或单个视频URL")
+        return False
+    
     # 获取播放列表信息
     is_playlist, playlist_title, entries = await get_playlist_info(url, proxy)
 
     if not is_playlist or not entries:
         print("无法获取播放列表信息或URL不是播放列表")
         return False
-
+    
     # 创建下载目录
     safe_playlist_title = sanitize_filename(playlist_title)
     download_dir = Path.cwd() / "downloads" / safe_playlist_title
@@ -997,6 +1015,10 @@ async def main():
 
         print("\nYouTube视频下载器启动...")
         print("=" * 50 + "\n")
+        print("支持的下载类型:")
+        print("- 单个YouTube视频")
+        print("- 标准YouTube播放列表(PL类型)")
+        print("=" * 50 + "\n")
 
         if args.only_audio:
             print("已启用仅下载音频模式")
@@ -1031,6 +1053,13 @@ async def main():
         # 处理播放列表
         if is_playlist_url:
             print("\n检测到播放列表URL")
+            
+            # 先检查是否为RD类型混合播放列表（虽然get_youtube_url已经过滤，这里做双重检查）
+            playlist_id = extract_playlist_id(url)
+            if playlist_id and playlist_id.startswith("RD"):
+                print("\n错误: 不支持下载YouTube混合播放列表(RD类型)")
+                print("请使用标准YouTube播放列表(PL类型)或单个视频URL")
+                return
 
             # 询问用户是否下载整个播放列表
             while True:

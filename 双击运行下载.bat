@@ -23,5 +23,4 @@ if errorlevel 1 (
 python downloader.py
 
 echo.
-echo 下载完成！
 pause
